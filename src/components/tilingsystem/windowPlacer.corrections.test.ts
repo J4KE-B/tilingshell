@@ -74,6 +74,58 @@ function fakeClient(frame: Rect, answer: (r: Rect) => Rect = (r) => r) {
 const DEST: Rect = { x: 8, y: 48, width: 1520, height: 808 };
 const START: Rect = { x: 0, y: 40, width: 800, height: 600 };
 
+test('right size but shifted after settling -> one move back, no loop', () => {
+    const { clock, advance } = manualClock();
+    // a CSD client whose geometry lands 8px up/left of what was asked
+    const shifted = (r: Rect) => ({ ...r, x: r.x - 8, y: r.y - 8 });
+    const { target, requests } = fakeClient(START, shifted);
+    const placer = new WindowPlacer(clock, { retryDelaysMs: [] });
+
+    placer.place(target, DEST);
+    advance(1000);
+    // the original request, then exactly one position fix-up, which the
+    // client shifts again; it is not asked a third time
+    assert.deepEqual(requests, ['8,48,1520,808', '8,48,1520,808']);
+    advance(20_000);
+    assert.equal(requests.length, 2);
+    placer.destroy();
+});
+
+test('right size but shifted, client accepts the fix-up -> lands on dest', () => {
+    const { clock, advance } = manualClock();
+    let first = true;
+    const { target } = fakeClient(START, (r) => {
+        if (!first) return r;
+        first = false;
+        return { ...r, x: r.x - 8, y: r.y - 8 };
+    });
+    const placer = new WindowPlacer(clock, { retryDelaysMs: [] });
+
+    placer.place(target, DEST);
+    advance(1000);
+    assert.deepEqual(target.getFrameRect(), DEST);
+    placer.destroy();
+});
+
+test('drift watch puts back a client that moves itself off its tile', () => {
+    const { clock, advance } = manualClock();
+    const { target, requests, setFrame } = fakeClient(START);
+    const placer = new WindowPlacer(clock, { retryDelaysMs: [] });
+
+    placer.place(target, DEST);
+    advance(500);
+    setFrame({ ...DEST, x: 0, y: 40 }); // e.g. late CSD geometry
+    advance(500);
+    assert.deepEqual(target.getFrameRect(), DEST);
+    // re-asking for the rect mutter last sent goes out behind a 1px nudge
+    assert.deepEqual(requests, [
+        '8,48,1520,808',
+        '8,48,1521,808',
+        '8,48,1520,808',
+    ]);
+    placer.destroy();
+});
+
 test('canCorrect false -> a user resize is not reverted', () => {
     const { clock, advance } = manualClock();
     const { target, requests, setFrame } = fakeClient(START);

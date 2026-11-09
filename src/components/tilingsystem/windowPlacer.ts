@@ -391,7 +391,7 @@ export class WindowPlacer {
                 hist.retries >= this._opts.retryDelaysMs.length);
         pending.onSettled?.(copyRect(pending.dest), copyRect(frame), final);
 
-        this._verify(target, hist, pending.dest, frame);
+        this._verify(target, hist, pending.dest, frame, pending.fromDrift);
     }
 
     private _mayCorrect(target: PlacementTarget, hist: History): boolean {
@@ -409,6 +409,7 @@ export class WindowPlacer {
         hist: History,
         dest: Rect,
         frame: Rect,
+        fromDrift = false,
     ): void {
         const delays = this._opts.retryDelaysMs;
         if (!sizeEquals(frame, dest)) {
@@ -433,6 +434,29 @@ export class WindowPlacer {
             return;
         }
 
+        // right size but off position, e.g. a CSD client (Chromium) whose
+        // window geometry arrives after the first frame and shifts it: ask
+        // for the position once. Done as a drift request so it cannot loop.
+        if (
+            !fromDrift &&
+            (frame.x !== dest.x || frame.y !== dest.y) &&
+            this._mayCorrect(target, hist)
+        ) {
+            hist.retries = delays.length;
+            this._request(
+                target,
+                hist,
+                dest,
+                dest,
+                frame,
+                hist.lastOptions ?? {},
+                hist.lastOptions?.userOp ?? false,
+                false,
+                true,
+            );
+            return;
+        }
+
         if (this._opts.driftWatchMs <= 0) return;
         const watch: NonNullable<History['watch']> = {
             disconnect: () => {},
@@ -448,9 +472,9 @@ export class WindowPlacer {
         };
         watch.disconnect = target.onGeometryChanged(() => {
             if (hist.watch !== watch || hist.pending) return;
-            if (sizeEquals(target.getFrameRect(), frame)) return;
-            // the client changed its size on its own: let it finish, then
-            // put it back once
+            if (rectEquals(target.getFrameRect(), frame)) return;
+            // the client changed its size or position on its own: let it
+            // finish, then put it back once
             if (watch.quiet !== null) this._clock.cancel(watch.quiet);
             watch.quiet = this._clock.timeout(this._opts.quietMs, () => {
                 watch.quiet = null;
