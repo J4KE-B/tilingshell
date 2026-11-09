@@ -445,8 +445,13 @@ export class TilingManager {
             'unmaximized',
             (_, window: Meta.Window) => {
                 // dynamic tiling unmaximizes windows on purpose; without this
-                // guard auto-tiling would grab each one a frame later
-                if (Settings.ENABLE_DYNAMIC_TILING) return;
+                // guard auto-tiling would grab each one a frame later. A
+                // window the user unmaximizes goes back into the layout.
+                if (Settings.ENABLE_DYNAMIC_TILING) {
+                    if (this._dynamicWindowSignals.has(window))
+                        this._queueDynamicReflow();
+                    return;
+                }
                 if (Settings.ENABLE_AUTO_TILING) this._autoTile(window, false);
             },
         );
@@ -457,6 +462,12 @@ export class TilingManager {
             'maximized',
             (_, window: Meta.Window) => {
                 delete (window as ExtendedWindow).assignedTile;
+                // a user-maximized window leaves the layout until unmaximized
+                if (
+                    Settings.ENABLE_DYNAMIC_TILING &&
+                    this._dynamicWindowSignals.has(window)
+                )
+                    this._queueDynamicReflow();
             },
         );
     }
@@ -1667,6 +1678,14 @@ export class TilingManager {
     ) {
         if (!final || !Settings.ENABLE_DYNAMIC_TILING) return;
         if (!this._dynamicWindowSignals.has(window)) return;
+        // mutter forces these to the monitor size; that says nothing about
+        // what the client accepts in a tile
+        if (
+            window.is_fullscreen() ||
+            window.maximizedHorizontally ||
+            window.maximizedVertically
+        )
+            return;
 
         const pin = { ...(this._pinnedWindows.get(window) ?? {}) };
         const update = (axis: 'width' | 'height') => {
@@ -1754,16 +1773,26 @@ export class TilingManager {
             window !== null &&
             window.windowType === Meta.WindowType.NORMAL &&
             window.get_transient_for() === null &&
-            !window.is_attached_dialog()
+            !window.is_attached_dialog() &&
+            // get_workspace() of a sticky window is whichever is active
+            !window.is_on_all_workspaces()
         );
     }
 
-    /** Trackable windows that additionally have a rectangle to be placed in. */
+    /**
+     * Trackable windows that additionally have a rectangle to be placed in.
+     * Fullscreen windows sit out, and so do maximized ones unless they just
+     * opened that way (those are tiled, see `_isDynamicTrackable`).
+     */
     private _isDynamicEligible(window: Meta.Window): boolean {
+        const maximized =
+            window.maximizedHorizontally || window.maximizedVertically;
         return (
             this._isDynamicTrackable(window) &&
             isWindowAlive(window) &&
-            !window.minimized
+            !window.minimized &&
+            !window.is_fullscreen() &&
+            (!maximized || this._dynamicNewcomers.has(window))
         );
     }
 
@@ -1784,6 +1813,9 @@ export class TilingManager {
             // moving to another workspace leaves a hole behind and crowds the
             // destination, so both ends need recomputing
             window.connect('workspace-changed', () =>
+                this._queueDynamicReflow(),
+            ),
+            window.connect('notify::fullscreen', () =>
                 this._queueDynamicReflow(),
             ),
             // dragging a window onto another monitor is the one way a
