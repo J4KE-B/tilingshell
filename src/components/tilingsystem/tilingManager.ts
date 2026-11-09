@@ -108,6 +108,9 @@ export class TilingManager {
     private _snapAssistingInfo: SnapAssistingInfo;
 
     private _movingWindowTimerId: number | null = null;
+    // any window is being moved or resized by the user (mutter 51 has no
+    // display.get_grab_op() anymore, so the grab signals are tracked)
+    private _userGrabActive = false;
     // Windows placed by dynamic tiling, in the order they claim slots.
     private _dynamicWindows: Meta.Window[] = [];
     // Per-window handlers, kept here because SignalHandling is keyed by signal
@@ -308,6 +311,7 @@ export class TilingManager {
                 window: Meta.Window,
                 grabOp: Meta.GrabOp,
             ) => {
+                this._userGrabActive = true;
                 const moving = (grabOp & ~1024) === 1;
                 if (!moving) return;
 
@@ -319,6 +323,7 @@ export class TilingManager {
             global.display,
             'grab-op-end',
             (_display: Meta.Display, window: Meta.Window) => {
+                this._userGrabActive = false;
                 if (!this._isGrabbingWindow) return;
 
                 this._onWindowGrabEnd(window);
@@ -1182,6 +1187,17 @@ export class TilingManager {
         unmaximizeWindow(window);
     }
 
+    /** whether the placer may still retry or correct a window's placement */
+    private _canCorrectPlacement(window: Meta.Window): boolean {
+        return (
+            !this._userGrabActive &&
+            isWindowAlive(window) &&
+            !window.is_fullscreen() &&
+            !window.maximizedHorizontally &&
+            !window.maximizedVertically
+        );
+    }
+
     private _easeWindowRect(
         window: Meta.Window,
         destRect: Mtk.Rectangle,
@@ -1195,6 +1211,7 @@ export class TilingManager {
             userOp: user_op,
             forceMove: force,
             animate: true,
+            canCorrect: () => this._canCorrectPlacement(window),
         });
     }
 
@@ -1632,6 +1649,7 @@ export class TilingManager {
             animate: !skipAnimation,
             onSettled: (requested, actual, final) =>
                 this._onPlacementSettled(window, requested, actual, final),
+            canCorrect: () => this._canCorrectPlacement(window),
         });
     }
 

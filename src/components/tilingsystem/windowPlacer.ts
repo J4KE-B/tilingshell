@@ -84,6 +84,12 @@ export interface PlaceOptions {
      * size matched, or every retry has been spent.
      */
     onSettled?: (requested: Rect, actual: Rect, final: boolean) => void;
+    /**
+     * Asked before every retry or drift correction; returning false drops it.
+     * Lets the caller keep the placer away from a window the user is dragging,
+     * resizing, or has maximized since.
+     */
+    canCorrect?: () => boolean;
 }
 
 export type PlaceResult =
@@ -388,6 +394,11 @@ export class WindowPlacer {
         this._verify(target, hist, pending.dest, frame);
     }
 
+    private _mayCorrect(target: PlacementTarget, hist: History): boolean {
+        if (!target.isAlive()) return false;
+        return hist.lastOptions?.canCorrect?.() ?? true;
+    }
+
     /**
      * The client has answered. If it did not give the size that was asked
      * for, ask again a little later (bounded); once it has, keep an eye on it
@@ -407,7 +418,7 @@ export class WindowPlacer {
             hist.retryTimeout = this._clock.timeout(delay, () => {
                 hist.retryTimeout = null;
                 this._inFlight.delete(target);
-                if (hist.pending || !target.isAlive()) return;
+                if (hist.pending || !this._mayCorrect(target, hist)) return;
                 this._request(
                     target,
                     hist,
@@ -444,7 +455,7 @@ export class WindowPlacer {
             watch.quiet = this._clock.timeout(this._opts.quietMs, () => {
                 watch.quiet = null;
                 stop();
-                if (!target.isAlive()) return;
+                if (!this._mayCorrect(target, hist)) return;
                 hist.retries = delays.length; // one correction, no retries
                 this._request(
                     target,
