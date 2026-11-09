@@ -84,6 +84,12 @@ export interface PlaceOptions {
      * size matched, or every retry has been spent.
      */
     onSettled?: (requested: Rect, actual: Rect, final: boolean) => void;
+    /**
+     * Asked before every retry or drift correction; returning false drops it.
+     * Lets the caller keep the placer away from a window the user is dragging,
+     * resizing, or has maximized since.
+     */
+    canCorrect?: () => boolean;
 }
 
 export type PlaceResult =
@@ -145,6 +151,9 @@ interface History {
 }
 
 export class WindowPlacer {
+    // one placer per monitor; a window placed by one must not be pulled back
+    // by a retry or drift watch still pending in another
+    private static readonly _instances = new Set<WindowPlacer>();
     private readonly _opts: PlacerOptions;
     private readonly _history = new WeakMap<PlacementTarget, History>();
     private readonly _inFlight = new Set<PlacementTarget>();
@@ -162,6 +171,7 @@ export class WindowPlacer {
             driftWatchMs: 10_000,
             ...opts,
         };
+        WindowPlacer._instances.add(this);
     }
 
     public place(
@@ -170,6 +180,9 @@ export class WindowPlacer {
         options: PlaceOptions = {},
     ): PlaceResult {
         if (!target.isAlive()) return 'skipped-dead';
+
+        for (const other of WindowPlacer._instances)
+            if (other !== this) other.forget(target);
 
         const hist = this._historyOf(target);
         const frame = target.getFrameRect();
@@ -262,6 +275,7 @@ export class WindowPlacer {
 
     public destroy(): void {
         for (const target of [...this._inFlight]) this.forget(target);
+        WindowPlacer._instances.delete(this);
     }
 
     private _request(
@@ -385,7 +399,12 @@ export class WindowPlacer {
                 hist.retries >= this._opts.retryDelaysMs.length);
         pending.onSettled?.(copyRect(pending.dest), copyRect(frame), final);
 
-        this._verify(target, hist, pending.dest, frame);
+        this._verify(target, hist, pending.dest, frame, pending.fromDrift);
+    }
+
+    private _mayCorrect(target: PlacementTarget, hist: History): boolean {
+        if (!target.isAlive()) return false;
+        return hist.lastOptions?.canCorrect?.() ?? true;
     }
 
     /**
@@ -398,6 +417,7 @@ export class WindowPlacer {
         hist: History,
         dest: Rect,
         frame: Rect,
+        fromDrift = false,
     ): void {
         const delays = this._opts.retryDelaysMs;
         if (!sizeEquals(frame, dest)) {
@@ -407,7 +427,7 @@ export class WindowPlacer {
             hist.retryTimeout = this._clock.timeout(delay, () => {
                 hist.retryTimeout = null;
                 this._inFlight.delete(target);
-                if (hist.pending || !target.isAlive()) return;
+                if (hist.pending || !this._mayCorrect(target, hist)) return;
                 this._request(
                     target,
                     hist,
@@ -419,6 +439,29 @@ export class WindowPlacer {
                     true,
                 );
             });
+            return;
+        }
+
+        // right size but off position, e.g. a CSD client (Chromium) whose
+        // window geometry arrives after the first frame and shifts it: ask
+        // for the position once. Done as a drift request so it cannot loop.
+        if (
+            !fromDrift &&
+            (frame.x !== dest.x || frame.y !== dest.y) &&
+            this._mayCorrect(target, hist)
+        ) {
+            hist.retries = delays.length;
+            this._request(
+                target,
+                hist,
+                dest,
+                dest,
+                frame,
+                hist.lastOptions ?? {},
+                hist.lastOptions?.userOp ?? false,
+                false,
+                true,
+            );
             return;
         }
 
@@ -437,14 +480,14 @@ export class WindowPlacer {
         };
         watch.disconnect = target.onGeometryChanged(() => {
             if (hist.watch !== watch || hist.pending) return;
-            if (sizeEquals(target.getFrameRect(), frame)) return;
-            // the client changed its size on its own: let it finish, then
-            // put it back once
+            if (rectEquals(target.getFrameRect(), frame)) return;
+            // the client changed its size or position on its own: let it
+            // finish, then put it back once
             if (watch.quiet !== null) this._clock.cancel(watch.quiet);
             watch.quiet = this._clock.timeout(this._opts.quietMs, () => {
                 watch.quiet = null;
                 stop();
-                if (!target.isAlive()) return;
+                if (!this._mayCorrect(target, hist)) return;
                 hist.retries = delays.length; // one correction, no retries
                 this._request(
                     target,
