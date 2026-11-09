@@ -151,6 +151,9 @@ interface History {
 }
 
 export class WindowPlacer {
+    // one placer per monitor; a window placed by one must not be pulled back
+    // by a retry or drift watch still pending in another
+    private static readonly _instances = new Set<WindowPlacer>();
     private readonly _opts: PlacerOptions;
     private readonly _history = new WeakMap<PlacementTarget, History>();
     private readonly _inFlight = new Set<PlacementTarget>();
@@ -168,6 +171,7 @@ export class WindowPlacer {
             driftWatchMs: 10_000,
             ...opts,
         };
+        WindowPlacer._instances.add(this);
     }
 
     public place(
@@ -176,6 +180,9 @@ export class WindowPlacer {
         options: PlaceOptions = {},
     ): PlaceResult {
         if (!target.isAlive()) return 'skipped-dead';
+
+        for (const other of WindowPlacer._instances)
+            if (other !== this) other.forget(target);
 
         const hist = this._historyOf(target);
         const frame = target.getFrameRect();
@@ -268,6 +275,7 @@ export class WindowPlacer {
 
     public destroy(): void {
         for (const target of [...this._inFlight]) this.forget(target);
+        WindowPlacer._instances.delete(this);
     }
 
     private _request(

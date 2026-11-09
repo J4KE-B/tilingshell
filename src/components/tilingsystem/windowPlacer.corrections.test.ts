@@ -159,3 +159,29 @@ test('canCorrect false -> retries of a refused size are dropped', () => {
     assert.equal(requests.length, 1);
     placer.destroy();
 });
+
+test('a window placed by another placer is no longer watched by the first', () => {
+    const { clock, advance } = manualClock();
+    const { target, requests, setFrame } = fakeClient(START);
+    const monitorA = new WindowPlacer(clock, {
+        monitorIndex: 0,
+        retryDelaysMs: [],
+    });
+    const monitorB = new WindowPlacer(clock, {
+        monitorIndex: 1,
+        retryDelaysMs: [],
+    });
+
+    monitorA.place(target, DEST);
+    advance(500);
+    const onB: Rect = { x: 1544, y: 48, width: 760, height: 808 };
+    monitorB.place(target, onB);
+    advance(500);
+    // the client drifts on B: B corrects it, A must not drag it back to DEST
+    setFrame({ ...onB, width: 700 });
+    advance(20_000);
+    assert.deepEqual(target.getFrameRect(), onB);
+    assert.ok(!requests.slice(1).includes('8,48,1520,808'));
+    monitorA.destroy();
+    monitorB.destroy();
+});
